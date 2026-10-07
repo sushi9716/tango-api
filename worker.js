@@ -89,12 +89,32 @@ export default {
 
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
     if (env.ALLOW_ORIGIN && origin && origin !== env.ALLOW_ORIGIN) return json({ error: 'このアドレスからは使えません' }, 403);
-    if (env.APP_TOKEN && request.headers.get('x-app-token') !== env.APP_TOKEN) return json({ error: '合言葉が違います' }, 401);
+    const reqUrl = new URL(request.url);
+    if (env.APP_TOKEN && request.headers.get('x-app-token') !== env.APP_TOKEN && reqUrl.searchParams.get('t') !== env.APP_TOKEN) return json({ error: '合言葉が違います' }, 401);
 
     const provider = env.ANTHROPIC_API_KEY ? 'claude' : env.AI ? 'workers-ai' : 'none';
-    const path = new URL(request.url).pathname;
+    const path = reqUrl.pathname;
 
     if (path.endsWith('/ping')) return json({ ok: true, provider });
+    if (path.endsWith('/tts') && request.method === 'GET') {
+      const text = (reqUrl.searchParams.get('text') || '').slice(0, 300);
+      if (!text) return json({ error: 'text がありません' }, 400);
+      if (!env.AI) return json({ error: 'Workers AI が設定されていません' }, 500);
+      try {
+        const r = await env.AI.run('@cf/myshell-ai/melotts', { prompt: text, lang: 'en' });
+        const headers = { ...cors, 'content-type': 'audio/mpeg', 'cache-control': 'public, max-age=31536000, immutable' };
+        if (r && typeof r.audio === 'string') {
+          const bin = atob(r.audio);
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          return new Response(bytes, { headers });
+        }
+        if (r instanceof ReadableStream || r instanceof ArrayBuffer || ArrayBuffer.isView(r)) return new Response(r, { headers });
+        return json({ error: '音声の形式が想定と違いました' }, 502);
+      } catch (err) {
+        return json({ error: String((err && err.message) || err) }, 502);
+      }
+    }
     if (provider === 'none') return json({ error: 'AIの設定がありません(Workers AIのバインディング、またはANTHROPIC_API_KEYを設定してください)' }, 500);
 
     if (path.endsWith('/fill') && request.method === 'POST') {
