@@ -95,8 +95,9 @@ export default {
     const provider = env.ANTHROPIC_API_KEY ? 'claude' : env.AI ? 'workers-ai' : 'none';
     const path = reqUrl.pathname;
 
-    if (path.endsWith('/ping')) return json({ ok: true, provider, version: 3, ai: !!env.AI, claude: !!env.ANTHROPIC_API_KEY, token: !!env.APP_TOKEN });
-    const audioHeaders = (src) => ({ ...cors, 'content-type': 'audio/mpeg', 'cache-control': 'public, max-age=2592000', 'x-source': src, 'Access-Control-Expose-Headers': 'x-source' });
+    if (path.endsWith('/ping')) return json({ ok: true, provider, version: 4, ai: !!env.AI, claude: !!env.ANTHROPIC_API_KEY, token: !!env.APP_TOKEN });
+    const EXPOSE = 'x-source,x-tried';
+    const audioHeaders = (src, tried) => ({ ...cors, 'content-type': 'audio/mpeg', 'cache-control': 'public, max-age=2592000', 'x-source': src, 'x-tried': tried || '-', 'Access-Control-Expose-Headers': EXPOSE });
     const melo = async (text) => {
       if (!env.AI) return null;
       const r = await env.AI.run('@cf/myshell-ai/melotts', { prompt: text, lang: 'en' });
@@ -120,21 +121,28 @@ export default {
         cands.push(['dictionaryapi-uk', 'https://api.dictionaryapi.dev/media/pronunciations/en/' + k + '-uk.mp3']);
       }
       cands.push(['youdao', 'https://dict.youdao.com/dictvoice?audio=' + encodeURIComponent(text) + '&type=2']);
-      for (const [name, u] of cands) {
+      const tried = [];
+      // 取得元を同時に試し、3秒で打ち切る。優先順位の高い成功を使う。
+      const got = await Promise.all(cands.map(async ([name, u]) => {
         try {
-          const r = await fetch(u, { cf: { cacheTtl: 86400, cacheEverything: true } });
+          const r = await fetch(u, { signal: AbortSignal.timeout(name.startsWith('dictionaryapi') ? 1500 : 3000), cf: { cacheTtl: 86400, cacheEverything: true } });
           const ct = r.headers.get('content-type') || '';
           if (r.ok && /audio|mpeg|octet/.test(ct)) {
             const buf = await r.arrayBuffer();
-            if (buf.byteLength > 500) return new Response(buf, { headers: audioHeaders(name) });
-          }
-        } catch (e) { /* 次の取得元を試す */ }
-      }
+            if (buf.byteLength > 500) { tried.push(name + ':OK'); return { name, buf }; }
+            tried.push(name + ':small');
+          } else tried.push(name + ':' + r.status);
+        } catch (e) { tried.push(name + ':' + ((e && e.name) || 'error')); }
+        return null;
+      }));
+      const hit = got.find(Boolean);
+      if (hit) return new Response(hit.buf, { headers: audioHeaders(hit.name, tried.join(',')) });
       try {
         const bytes = await melo(text);
-        if (bytes) return new Response(bytes, { headers: audioHeaders('melotts') });
-      } catch (e) { /* 失敗 */ }
-      return json({ error: '音声を取得できませんでした' }, 502);
+        if (bytes) { tried.push('melotts:OK'); return new Response(bytes, { headers: audioHeaders('melotts', tried.join(',')) }); }
+        tried.push('melotts:none');
+      } catch (e) { tried.push('melotts:' + String((e && e.message) || e).slice(0, 60)); }
+      return new Response(JSON.stringify({ error: '音声を取得できませんでした', tried: tried.join(',') }), { status: 502, headers: { ...cors, 'content-type': 'application/json; charset=utf-8', 'x-tried': tried.join(','), 'Access-Control-Expose-Headers': EXPOSE } });
     }
 
     if (path.endsWith('/tts') && request.method === 'GET') {
