@@ -1,0 +1,6 @@
+{
+  "name": "tango-api",
+  "main": "worker.js",
+  "compatibility_date": "2025-10-01",
+  "ai": { "binding": "AI" }
+}
