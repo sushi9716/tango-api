@@ -95,7 +95,7 @@ export default {
     const provider = env.ANTHROPIC_API_KEY ? 'claude' : env.AI ? 'workers-ai' : 'none';
     const path = reqUrl.pathname;
 
-    if (path.endsWith('/ping')) return json({ ok: true, provider, version: 4, ai: !!env.AI, claude: !!env.ANTHROPIC_API_KEY, token: !!env.APP_TOKEN });
+    if (path.endsWith('/ping')) return json({ ok: true, provider, version: 5, ai: !!env.AI, claude: !!env.ANTHROPIC_API_KEY, token: !!env.APP_TOKEN });
     const EXPOSE = 'x-source,x-tried';
     const audioHeaders = (src, tried) => ({ ...cors, 'content-type': 'audio/mpeg', 'cache-control': 'public, max-age=2592000', 'x-source': src, 'x-tried': tried || '-', 'Access-Control-Expose-Headers': EXPOSE });
     const melo = async (text) => {
@@ -122,10 +122,9 @@ export default {
       }
       cands.push(['youdao', 'https://dict.youdao.com/dictvoice?audio=' + encodeURIComponent(text) + '&type=2']);
       const tried = [];
-      // 取得元を同時に試し、3秒で打ち切る。優先順位の高い成功を使う。
-      const got = await Promise.all(cands.map(async ([name, u]) => {
+      const fetchOne = async ([name, u], ms) => {
         try {
-          const r = await fetch(u, { signal: AbortSignal.timeout(name.startsWith('dictionaryapi') ? 1500 : 3000), cf: { cacheTtl: 86400, cacheEverything: true } });
+          const r = await fetch(u, { signal: AbortSignal.timeout(ms), cf: { cacheTtl: 86400, cacheEverything: true } });
           const ct = r.headers.get('content-type') || '';
           if (r.ok && /audio|mpeg|octet/.test(ct)) {
             const buf = await r.arrayBuffer();
@@ -134,8 +133,13 @@ export default {
           } else tried.push(name + ':' + r.status);
         } catch (e) { tried.push(name + ':' + ((e && e.name) || 'error')); }
         return null;
-      }));
-      const hit = got.find(Boolean);
+      };
+      // Youdaoを先に試し、だめなときだけ辞書APIを試す(辞書APIは応答しないことが多いため)
+      let hit = await fetchOne(cands.find((c) => c[0] === 'youdao'), 3000);
+      if (!hit) {
+        const got = await Promise.all(cands.filter((c) => c[0] !== 'youdao').map((c) => fetchOne(c, 1500)));
+        hit = got.find(Boolean) || null;
+      }
       if (hit) return new Response(hit.buf, { headers: audioHeaders(hit.name, tried.join(',')) });
       try {
         const bytes = await melo(text);
