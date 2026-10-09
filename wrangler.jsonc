@@ -4,7 +4,7 @@
   "compatibility_date": "2025-10-01",
   "ai": { "binding": "AI" },
   "kv_namespaces": [
-    { "binding": "KV", "id": "ここをKVのIDに書き換える" }
+    { "binding": "KV", "id": "978a7d011f0d47aea96133e16497e4b1" }
   ],
   "triggers": { "crons": ["0 * * * *"] }
 }
