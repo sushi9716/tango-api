@@ -7,23 +7,25 @@
 
 const MAX_ITEMS = 12;
 
-function buildPrompt(items, others) {
-  return `次の英単語それぞれについて、日本の大学受験(共通テスト・難関大の入試)向けの英語の例文を1つ作り、その和訳を付けてください。
+function buildPrompt(items) {
+  return `次の英単語それぞれについて、日本の大学受験(共通テスト・難関大の入試)向けの「重要フレーズ」(短い語句)を作り、その和訳を付けてください。
 
 条件:
-- 例文は、入試で見かける程度の自然で標準的な英文を1文(長すぎない)にする。
-- 単語のよくある使い方(前置詞との組み合わせ、コロケーション、語法)が伝わる文にする。
-- 「他の登録単語」を、不自然にならない範囲で例文に含めてよい(無理に含めない)。
-- 単語は、例文の中で原形か、自然な活用形で使う。
-- 和訳は自然な日本語にする。
-- "e" に既存の例文が入っている単語は、その例文を一字一句そのまま使い、"j"(和訳)だけ作る。
-- 出力はJSONのみ。説明文やコードブロックは付けない。形式: {"results":[{"f":"単語","e":"例文","j":"和訳"}]}
+- 文ではなく、2〜6語ほどの短いフレーズにする。ピリオドは付けない。例: abandon → abandon a plan / 計画を断念する
+- 前置詞との組み合わせ、コロケーション、入試で問われる語法を優先する。使い方が一目でわかる形にする。
+- "b" (意味)に複数の意味や用法があるときは、意味ごとに1つずつフレーズを作る(最大3つ)。意味が1つなら、フレーズも1つでよい。
+- 単語は、原形か自然な活用形で使う。
+- 和訳は、フレーズに対応する短く自然な日本語にする。
+- "e" に既存の例文やフレーズが入っている単語は、それを一字一句そのまま使い、"j"(和訳)だけ作る。既存が複数行のときは、同じ数だけ和訳を作る。
+- "e" と "j" は配列にし、同じ順・同じ個数にする。
+- 出力はJSONのみ。説明文やコードブロックは付けない。形式: {"results":[{"f":"単語","e":["フレーズ1","フレーズ2"],"j":["和訳1","和訳2"]}]}
 
 対象の単語:
-${JSON.stringify(items)}
-
-他の登録単語:
-${others.join(', ')}`;
+${JSON.stringify(items)}`;
+}
+function joinLines(v) {
+  const a = Array.isArray(v) ? v : String(v || '').split(/\r?\n/);
+  return a.map((x) => String(x || '').trim()).filter(Boolean).join('\n');
 }
 
 function extractList(text) {
@@ -100,7 +102,7 @@ async function sendPush(env, sub) {
   const r = await fetch(sub.endpoint, { method: 'POST', headers: { Authorization: await vapidHeader(env, sub.endpoint), TTL: '43200', Urgency: 'normal' } });
   return r.status;
 }
-function localDay(tz) { const d = new Date(Date.now() - (tz || 0) * 60000); return { day: d.getUTCFullYear() + '-' + (d.getUTCMonth() + 1) + '-' + d.getUTCDate(), hour: d.getUTCHours() }; }
+function localDay(tz) { const d = new Date(Date.now() - (tz || 0) * 60000); return { day: d.getUTCFullYear() + '-' + (d.getUTCMonth() + 1) + '-' + d.getUTCDate(), hour: d.getUTCHours(), mins: d.getUTCHours() * 60 + d.getUTCMinutes() }; }
 function dayGap(a, b) {
   const p = (s) => { const q = String(s || '').split('-'); return q.length === 3 ? Date.UTC(+q[0], +q[1] - 1, +q[2]) : NaN; };
   const x = p(a), y = p(b);
@@ -117,9 +119,10 @@ async function pushTick(env) {
   const gap = dayGap(cfg.lastDone || cfg.since, now.day);
   let kind = '';
   // 決めた時刻の通知。何日も反応がないときは、3日あとからは4日おきに減らす
-  if (now.hour === cfg.hour && cfg.lastSent !== now.day && (gap <= 3 || gap % 4 === 0)) kind = 'main';
+  const target = (cfg.hour || 0) * 60 + (cfg.min || 0);
+  if (now.mins >= target && now.mins < target + 60 && cfg.lastSent !== now.day && (gap <= 3 || gap % 4 === 0)) kind = 'main';
   // 夜10時の最後の通知は、連続記録が危ないときだけ
-  else if (now.hour === 22 && cfg.hour < 22 && (cfg.streak || 0) >= 1 && gap <= 1 && cfg.lastSent2 !== now.day) kind = 'risk';
+  else if (now.mins >= 22 * 60 && now.mins < 23 * 60 && target < 22 * 60 && (cfg.streak || 0) >= 1 && gap <= 1 && cfg.lastSent2 !== now.day) kind = 'risk';
   if (!kind) return;
   const st = await sendPush(env, cfg.sub);
   if (st === 404 || st === 410) { await env.KV.delete('push'); return; }
@@ -148,7 +151,7 @@ export default {
     const provider = env.ANTHROPIC_API_KEY ? 'claude' : env.AI ? 'workers-ai' : 'none';
     const path = reqUrl.pathname;
 
-    if (path.endsWith('/ping')) return json({ ok: true, provider, version: 8, ai: !!env.AI, claude: !!env.ANTHROPIC_API_KEY, token: !!env.APP_TOKEN, kv: !!env.KV, push: !!env.KV });
+    if (path.endsWith('/ping')) return json({ ok: true, provider, version: 9, ai: !!env.AI, claude: !!env.ANTHROPIC_API_KEY, token: !!env.APP_TOKEN, kv: !!env.KV, push: !!env.KV });
 
     // 通知の設定(KVが必要)
     if (path.includes('/push/')) {
@@ -160,13 +163,13 @@ export default {
       const cur = JSON.parse((await env.KV.get('push')) || '{}');
       if (path.endsWith('/push/sub')) {
         if (!b.sub || !b.sub.endpoint) return json({ error: '通知の登録情報がありません' }, 400);
-        const cfg = { sub: b.sub, hour: Math.max(0, Math.min(23, +b.hour || 19)), tz: +b.tz || 0, lastDone: b.day || cur.lastDone || '', since: cur.since || localDay(+b.tz || 0).day, lastSent: cur.lastSent || '', lastSent2: cur.lastSent2 || '', streak: cur.streak || 0 };
+        const cfg = { sub: b.sub, hour: Math.max(0, Math.min(23, b.hour == null ? 19 : +b.hour || 0)), min: Math.max(0, Math.min(59, +b.min || 0)), tz: +b.tz || 0, lastDone: b.day || cur.lastDone || '', since: cur.since || localDay(+b.tz || 0).day, lastSent: cur.lastSent || '', lastSent2: cur.lastSent2 || '', streak: cur.streak || 0 };
         await env.KV.put('push', JSON.stringify(cfg));
         return json({ ok: true });
       }
       if (path.endsWith('/push/unsub')) { await env.KV.delete('push'); return json({ ok: true }); }
       if (path.endsWith('/push/state')) {
-        if (cur.sub) { if (b.day) cur.lastDone = b.day; if (b.streak !== undefined) cur.streak = Math.max(0, +b.streak || 0); if (b.hour !== undefined) cur.hour = Math.max(0, Math.min(23, +b.hour)); await env.KV.put('push', JSON.stringify(cur)); }
+        if (cur.sub) { if (b.day) cur.lastDone = b.day; if (b.streak !== undefined) cur.streak = Math.max(0, +b.streak || 0); if (b.hour !== undefined) cur.hour = Math.max(0, Math.min(23, +b.hour || 0)); if (b.min !== undefined) cur.min = Math.max(0, Math.min(59, +b.min || 0)); await env.KV.put('push', JSON.stringify(cur)); }
         return json({ ok: true, registered: !!cur.sub });
       }
       if (path.endsWith('/push/test')) {
@@ -284,7 +287,7 @@ export default {
       if (!items.length) return json({ error: '単語がありません' }, 400);
       const others = (Array.isArray(body.others) ? body.others : []).slice(0, 80).map((x) => String(x).slice(0, 40));
       try {
-        const prompt = buildPrompt(items, others);
+        const prompt = buildPrompt(items);
         const text = provider === 'claude' ? await callClaude(env, prompt) : await callWorkersAI(env, prompt);
         const list = extractList(text);
         const byF = {};
@@ -293,8 +296,8 @@ export default {
         list.forEach((r) => {
           const src = byF[String((r && r.f) || '').trim().toLowerCase()];
           if (!src) return;
-          const e = src.e ? src.e : String(r.e || '').trim();
-          const j = String(r.j || '').trim();
+          const e = src.e ? src.e : joinLines(r.e);
+          const j = joinLines(r.j);
           if (e || j) results.push({ f: src.f, e, j });
         });
         return json({ results, provider });

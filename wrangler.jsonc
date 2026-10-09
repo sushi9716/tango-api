@@ -6,5 +6,5 @@
   "kv_namespaces": [
     { "binding": "KV", "id": "978a7d011f0d47aea96133e16497e4b1" }
   ],
-  "triggers": { "crons": ["0 * * * *"] }
+  "triggers": { "crons": ["*/15 * * * *"] }
 }
