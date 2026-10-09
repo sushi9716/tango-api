@@ -74,6 +74,59 @@ async function callWorkersAI(env, prompt) {
   return typeof t === 'string' ? t : JSON.stringify(t || '');
 }
 
+// ---- 通知(Web Push)。空の通知だけを送るので、暗号化は不要。VAPIDの鍵は、初回にWorkerが作ってKVに保存する ----
+const b64u = (buf) => { let s = ''; new Uint8Array(buf).forEach((c) => (s += String.fromCharCode(c))); return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, ''); };
+const unb64u = (s) => { s = s.replace(/-/g, '+').replace(/_/g, '/'); while (s.length % 4) s += '='; const bin = atob(s); const u = new Uint8Array(bin.length); for (let i = 0; i < bin.length; i++) u[i] = bin.charCodeAt(i); return u; };
+async function getVapid(env) {
+  const saved = await env.KV.get('vapid');
+  if (saved) return JSON.parse(saved);
+  const kp = await crypto.subtle.generateKey({ name: 'ECDSA', namedCurve: 'P-256' }, true, ['sign', 'verify']);
+  const priv = await crypto.subtle.exportKey('jwk', kp.privateKey);
+  const raw = await crypto.subtle.exportKey('raw', kp.publicKey);
+  const v = { jwk: priv, pub: b64u(raw) };
+  await env.KV.put('vapid', JSON.stringify(v));
+  return v;
+}
+async function vapidHeader(env, endpoint) {
+  const v = await getVapid(env);
+  const key = await crypto.subtle.importKey('jwk', v.jwk, { name: 'ECDSA', namedCurve: 'P-256' }, false, ['sign']);
+  const enc = (o) => b64u(new TextEncoder().encode(JSON.stringify(o)));
+  const head = enc({ typ: 'JWT', alg: 'ES256' });
+  const body = enc({ aud: new URL(endpoint).origin, exp: Math.floor(Date.now() / 1000) + 12 * 3600, sub: env.VAPID_SUBJECT || 'mailto:noreply@example.com' });
+  const sig = await crypto.subtle.sign({ name: 'ECDSA', hash: 'SHA-256' }, key, new TextEncoder().encode(head + '.' + body));
+  return 'vapid t=' + head + '.' + body + '.' + b64u(sig) + ', k=' + v.pub;
+}
+async function sendPush(env, sub) {
+  const r = await fetch(sub.endpoint, { method: 'POST', headers: { Authorization: await vapidHeader(env, sub.endpoint), TTL: '43200', Urgency: 'normal' } });
+  return r.status;
+}
+function localDay(tz) { const d = new Date(Date.now() - (tz || 0) * 60000); return { day: d.getUTCFullYear() + '-' + (d.getUTCMonth() + 1) + '-' + d.getUTCDate(), hour: d.getUTCHours() }; }
+function dayGap(a, b) {
+  const p = (s) => { const q = String(s || '').split('-'); return q.length === 3 ? Date.UTC(+q[0], +q[1] - 1, +q[2]) : NaN; };
+  const x = p(a), y = p(b);
+  return isNaN(x) || isNaN(y) ? 0 : Math.max(0, Math.round((y - x) / 86400000));
+}
+async function pushTick(env) {
+  if (!env.KV) return;
+  const raw = await env.KV.get('push');
+  if (!raw) return;
+  const cfg = JSON.parse(raw);
+  if (!cfg.sub || cfg.off) return;
+  const now = localDay(cfg.tz);
+  if (cfg.lastDone === now.day) return;
+  const gap = dayGap(cfg.lastDone || cfg.since, now.day);
+  let kind = '';
+  // 決めた時刻の通知。何日も反応がないときは、3日あとからは4日おきに減らす
+  if (now.hour === cfg.hour && cfg.lastSent !== now.day && (gap <= 3 || gap % 4 === 0)) kind = 'main';
+  // 夜10時の最後の通知は、連続記録が危ないときだけ
+  else if (now.hour === 22 && cfg.hour < 22 && (cfg.streak || 0) >= 1 && gap <= 1 && cfg.lastSent2 !== now.day) kind = 'risk';
+  if (!kind) return;
+  const st = await sendPush(env, cfg.sub);
+  if (st === 404 || st === 410) { await env.KV.delete('push'); return; }
+  if (kind === 'main') cfg.lastSent = now.day; else cfg.lastSent2 = now.day;
+  await env.KV.put('push', JSON.stringify(cfg));
+}
+
 export default {
   async fetch(request, env) {
     const origin = request.headers.get('Origin') || '';
@@ -95,7 +148,64 @@ export default {
     const provider = env.ANTHROPIC_API_KEY ? 'claude' : env.AI ? 'workers-ai' : 'none';
     const path = reqUrl.pathname;
 
-    if (path.endsWith('/ping')) return json({ ok: true, provider, version: 5, ai: !!env.AI, claude: !!env.ANTHROPIC_API_KEY, token: !!env.APP_TOKEN });
+    if (path.endsWith('/ping')) return json({ ok: true, provider, version: 8, ai: !!env.AI, claude: !!env.ANTHROPIC_API_KEY, token: !!env.APP_TOKEN, kv: !!env.KV, push: !!env.KV });
+
+    // 通知の設定(KVが必要)
+    if (path.includes('/push/')) {
+      if (!env.KV) return json({ error: 'KVが設定されていません' }, 501);
+      if (path.endsWith('/push/key')) return json({ ok: true, key: (await getVapid(env)).pub });
+      if (request.method !== 'POST') return json({ error: 'この操作はできません' }, 405);
+      let b = {};
+      try { b = await request.json(); } catch (e) {}
+      const cur = JSON.parse((await env.KV.get('push')) || '{}');
+      if (path.endsWith('/push/sub')) {
+        if (!b.sub || !b.sub.endpoint) return json({ error: '通知の登録情報がありません' }, 400);
+        const cfg = { sub: b.sub, hour: Math.max(0, Math.min(23, +b.hour || 19)), tz: +b.tz || 0, lastDone: b.day || cur.lastDone || '', since: cur.since || localDay(+b.tz || 0).day, lastSent: cur.lastSent || '', lastSent2: cur.lastSent2 || '', streak: cur.streak || 0 };
+        await env.KV.put('push', JSON.stringify(cfg));
+        return json({ ok: true });
+      }
+      if (path.endsWith('/push/unsub')) { await env.KV.delete('push'); return json({ ok: true }); }
+      if (path.endsWith('/push/state')) {
+        if (cur.sub) { if (b.day) cur.lastDone = b.day; if (b.streak !== undefined) cur.streak = Math.max(0, +b.streak || 0); if (b.hour !== undefined) cur.hour = Math.max(0, Math.min(23, +b.hour)); await env.KV.put('push', JSON.stringify(cur)); }
+        return json({ ok: true, registered: !!cur.sub });
+      }
+      if (path.endsWith('/push/test')) {
+        if (!cur.sub) return json({ error: '通知が登録されていません' }, 400);
+        const st = await sendPush(env, cur.sub);
+        return json({ ok: st >= 200 && st < 300, status: st });
+      }
+      return json({ error: '見つかりません' }, 404);
+    }
+
+    // クラウドバックアップ(KVに1件だけ保存。6時間以上たっていたら、前の保存を「ひとつ前」に残す)
+    if (path.endsWith('/sync')) {
+      if (!env.KV) return json({ error: 'KVが設定されていません(Workerの設定でKVを追加してください)' }, 501);
+      if (request.method === 'GET' && reqUrl.searchParams.get('test')) {
+        const v = String(Date.now());
+        await env.KV.put('test', v);
+        const back = await env.KV.get('test');
+        return json({ ok: back === v, kv: true });
+      }
+      if (request.method === 'GET') {
+        const key = reqUrl.searchParams.get('gen') === 'prev' ? 'bk-prev' : 'bk';
+        const v = await env.KV.get(key);
+        if (!v) return json({ error: '保存されたバックアップがありません' }, 404);
+        const o = JSON.parse(v);
+        return json({ ok: true, t: o.t, text: o.text });
+      }
+      if (request.method === 'POST') {
+        const text = await request.text();
+        if (!text.startsWith('TANGO BACKUP 1 ') || text.length > 20000000) return json({ error: 'バックアップの形式が違います' }, 400);
+        const cur = await env.KV.get('bk');
+        if (cur) {
+          try { const c = JSON.parse(cur); if (Date.now() - c.t > 6 * 3600 * 1000) await env.KV.put('bk-prev', cur); } catch (e) {}
+        }
+        const t = Date.now();
+        await env.KV.put('bk', JSON.stringify({ t, text }));
+        return json({ ok: true, t });
+      }
+      return json({ error: 'この操作はできません' }, 405);
+    }
     const EXPOSE = 'x-source,x-tried';
     const audioHeaders = (src, tried) => ({ ...cors, 'content-type': 'audio/mpeg', 'cache-control': 'public, max-age=2592000', 'x-source': src, 'x-tried': tried || '-', 'Access-Control-Expose-Headers': EXPOSE });
     const melo = async (text) => {
@@ -193,5 +303,8 @@ export default {
       }
     }
     return json({ error: '見つかりません' }, 404);
+  },
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(pushTick(env));
   },
 };
