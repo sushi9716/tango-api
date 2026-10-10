@@ -151,7 +151,7 @@ export default {
     const provider = env.ANTHROPIC_API_KEY ? 'claude' : env.AI ? 'workers-ai' : 'none';
     const path = reqUrl.pathname;
 
-    if (path.endsWith('/ping')) return json({ ok: true, provider, version: 9, ai: !!env.AI, claude: !!env.ANTHROPIC_API_KEY, token: !!env.APP_TOKEN, kv: !!env.KV, push: !!env.KV });
+    if (path.endsWith('/ping')) return json({ ok: true, provider, version: 10, ai: !!env.AI, claude: !!env.ANTHROPIC_API_KEY, token: !!env.APP_TOKEN, kv: !!env.KV, push: !!env.KV });
 
     // 通知の設定(KVが必要)
     if (path.includes('/push/')) {
@@ -209,11 +209,12 @@ export default {
       }
       return json({ error: 'この操作はできません' }, 405);
     }
-    const EXPOSE = 'x-source,x-tried';
-    const audioHeaders = (src, tried) => ({ ...cors, 'content-type': 'audio/mpeg', 'cache-control': 'public, max-age=2592000', 'x-source': src, 'x-tried': tried || '-', 'Access-Control-Expose-Headers': EXPOSE });
-    const melo = async (text) => {
+    let audioLang = 'en';
+    const EXPOSE = 'x-source,x-tried,x-lang';
+    const audioHeaders = (src, tried) => ({ ...cors, 'content-type': 'audio/mpeg', 'cache-control': 'public, max-age=2592000', 'x-source': src, 'x-tried': tried || '-', 'x-lang': audioLang, 'Access-Control-Expose-Headers': EXPOSE });
+    const melo = async (text, lang) => {
       if (!env.AI) return null;
-      const r = await env.AI.run('@cf/myshell-ai/melotts', { prompt: text, lang: 'en' });
+      const r = await env.AI.run('@cf/myshell-ai/melotts', { prompt: text, lang: lang || 'en' });
       if (r && typeof r.audio === 'string') {
         const bin = atob(r.audio);
         const bytes = new Uint8Array(bin.length);
@@ -227,6 +228,33 @@ export default {
     if (path.endsWith('/audio') && request.method === 'GET') {
       const text = (reqUrl.searchParams.get('text') || '').trim().slice(0, 300);
       if (!text) return json({ error: 'text がありません' }, 400);
+      if ((reqUrl.searchParams.get('lang') || '') === 'ja') {
+        audioLang = 'ja';
+        const tried = [];
+        const urls = [
+          ['youdao-ja', 'https://dict.youdao.com/dictvoice?audio=' + encodeURIComponent(text) + '&le=jap'],
+          ['google-ja', 'https://translate.google.com/translate_tts?ie=UTF-8&client=tw-ob&tl=ja&q=' + encodeURIComponent(text)],
+        ];
+        for (const [name, u] of urls) {
+          try {
+            const r = await fetch(u, { signal: AbortSignal.timeout(4000), headers: { 'User-Agent': 'Mozilla/5.0' }, cf: { cacheTtl: 86400, cacheEverything: true } });
+            const ct = r.headers.get('content-type') || '';
+            if (r.ok && /audio|mpeg|octet/.test(ct)) {
+              const buf = await r.arrayBuffer();
+              if (buf.byteLength > 500) { tried.push(name + ':OK'); return new Response(buf, { headers: audioHeaders(name, tried.join(',')) }); }
+              tried.push(name + ':small');
+            } else tried.push(name + ':' + r.status);
+          } catch (e) { tried.push(name + ':' + ((e && e.name) || 'error')); }
+        }
+        for (const lg of ['ja', 'jp']) {
+          try {
+            const bytes = await melo(text, lg);
+            if (bytes) { tried.push('melotts-' + lg + ':OK'); return new Response(bytes, { headers: audioHeaders('melotts-' + lg, tried.join(',')) }); }
+            tried.push('melotts-' + lg + ':none');
+          } catch (e) { tried.push('melotts-' + lg + ':' + String((e && e.message) || e).slice(0, 50)); }
+        }
+        return new Response(JSON.stringify({ error: '日本語の音声を取得できませんでした', tried: tried.join(',') }), { status: 502, headers: { ...cors, 'content-type': 'application/json; charset=utf-8', 'x-tried': tried.join(','), 'Access-Control-Expose-Headers': EXPOSE } });
+      }
       const cands = [];
       if (/^[A-Za-z]+$/.test(text)) {
         const k = text.toLowerCase();
