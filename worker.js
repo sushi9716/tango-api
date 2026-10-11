@@ -5,23 +5,35 @@
 //  - Secrets(任意): APP_TOKEN(合言葉)、ANTHROPIC_API_KEY(Claudeを使う場合)
 //  - Variables(任意): ALLOW_ORIGIN(アプリのURL。例 https://tangoes.xxxx.workers.dev)、AI_MODEL、CLAUDE_MODEL
 
-const MAX_ITEMS = 12;
+const MAX_ITEMS = 36;
+const CHUNK_GEN = 4, CHUNK_TR = 9;
+const LNAME = { en: '英語', es: 'スペイン語', ja: '日本語' };
 
 function buildPrompt(items) {
-  return `次の英単語それぞれについて、日本の大学受験(共通テスト・難関大の入試)向けの「重要フレーズ」(短い語句)を作り、その和訳を付けてください。
+  const lg = items[0] && items[0].l;
+  const L = LNAME[lg] && lg !== 'en' ? `\n- 単語は${LNAME[lg]}です。フレーズも${LNAME[lg]}で作る(大学受験の観点は不要。日常でよく使う自然な語句にする)。` : '';
+  return `次の単語それぞれについて、日本の大学受験(共通テスト・難関大の入試)向けの「重要フレーズ」(短い語句)を作り、その和訳を付けてください。
 
 条件:
 - 文ではなく、2〜6語ほどの短いフレーズにする。ピリオドは付けない。例: abandon → abandon a plan / 計画を断念する
 - 前置詞との組み合わせ、コロケーション、入試で問われる語法を優先する。使い方が一目でわかる形にする。
 - "b" (意味)に複数の意味や用法があるときは、意味ごとに1つずつフレーズを作る(最大3つ)。意味が1つなら、フレーズも1つでよい。
-- 単語は、原形か自然な活用形で使う。
+- 単語は、原形か自然な活用形で使う。${L}
 - 和訳は、フレーズに対応する短く自然な日本語にする。
 - "e" に既存の例文やフレーズが入っている単語は、それを一字一句そのまま使い、"j"(和訳)だけ作る。既存が複数行のときは、同じ数だけ和訳を作る。
-- "e" と "j" は配列にし、同じ順・同じ個数にする。
+${items.some((x) => x.a) ? '- "a" があるときは、"a" のフレーズとは別の、違う用法・違う組み合わせのフレーズを作る(a と同じものは使わない)。\n' : ''}- "e" と "j" は配列にし、同じ順・同じ個数にする。
 - 出力はJSONのみ。説明文やコードブロックは付けない。形式: {"results":[{"f":"単語","e":["フレーズ1","フレーズ2"],"j":["和訳1","和訳2"]}]}
 
 対象の単語:
 ${JSON.stringify(items)}`;
+}
+function buildTrPrompt(items) {
+  const lg = items[0] && items[0].l;
+  return `次の${LNAME[lg] || '英語'}のフレーズ(例文)に、短く自然な日本語の和訳を付けてください。
+- "e" は変更せず、和訳だけ作る。"e" が複数行のときは、行ごとに同じ順・同じ数で和訳を作る。
+- 出力はJSONのみ: {"results":[{"f":"単語","j":["和訳1","和訳2"]}]}
+
+${JSON.stringify(items.map((x) => ({ f: x.f, e: x.e.split(/\n/).filter(Boolean) })))}`;
 }
 function joinLines(v) {
   const a = Array.isArray(v) ? v : String(v || '').split(/\r?\n/);
@@ -62,14 +74,14 @@ async function callClaude(env, prompt) {
   return (j.content || []).map((c) => c.text || '').join('');
 }
 
-async function callWorkersAI(env, prompt) {
+async function callWorkersAI(env, prompt, maxTok) {
   const model = env.AI_MODEL || '@cf/meta/llama-3.3-70b-instruct-fp8-fast';
   const r = await env.AI.run(model, {
     messages: [
       { role: 'system', content: 'あなたは日本の大学受験向けの英語教材を作る、経験豊富な教師です。指示された形式のJSONだけを出力します。' },
       { role: 'user', content: prompt },
     ],
-    max_tokens: 2500,
+    max_tokens: maxTok || 1500,
     temperature: 0.4,
   });
   const t = r && r.response;
@@ -151,7 +163,7 @@ export default {
     const provider = env.ANTHROPIC_API_KEY ? 'claude' : env.AI ? 'workers-ai' : 'none';
     const path = reqUrl.pathname;
 
-    if (path.endsWith('/ping')) return json({ ok: true, provider, version: 11, ai: !!env.AI, claude: !!env.ANTHROPIC_API_KEY, token: !!env.APP_TOKEN, kv: !!env.KV, push: !!env.KV });
+    if (path.endsWith('/ping')) return json({ ok: true, provider, version: 13, ai: !!env.AI, claude: !!env.ANTHROPIC_API_KEY, token: !!env.APP_TOKEN, kv: !!env.KV, push: !!env.KV });
 
     // 通知の設定(KVが必要)
     if (path.includes('/push/')) {
@@ -313,28 +325,39 @@ export default {
       try { body = await request.json(); } catch (e) { return json({ error: '送られたデータが読み取れません' }, 400); }
       const items = (Array.isArray(body.items) ? body.items : [])
         .slice(0, MAX_ITEMS)
-        .map((x) => ({ f: String(x.f || '').slice(0, 60), b: String(x.b || '').slice(0, 120), e: String(x.e || '').slice(0, 300) }))
+        .map((x) => ({ f: String(x.f || '').slice(0, 60), b: String(x.b || '').slice(0, 120), e: String(x.e || '').slice(0, 300), a: String(x.a || '').slice(0, 300), l: LNAME[x.l] ? x.l : 'en' }))
         .filter((x) => x.f && x.b);
       if (!items.length) return json({ error: '単語がありません' }, 400);
-      const others = (Array.isArray(body.others) ? body.others : []).slice(0, 80).map((x) => String(x).slice(0, 40));
-      try {
-        const prompt = buildPrompt(items);
-        const text = provider === 'claude' ? await callClaude(env, prompt) : await callWorkersAI(env, prompt);
-        const list = extractList(text);
-        const byF = {};
-        items.forEach((x) => { byF[x.f.toLowerCase()] = x; });
-        const results = [];
-        list.forEach((r) => {
+      const byF = {};
+      items.forEach((x) => { byF[x.f.toLowerCase()] = x; });
+      // 例文ありは和訳だけ(速い)、例文なしはフレーズ生成。言語ごと・種類ごとに小さく分けて、並列で実行する
+      const jobs = [];
+      ['en', 'es', 'ja'].forEach((lg) => {
+        const g = items.filter((x) => x.l === lg && !x.e), t = items.filter((x) => x.l === lg && x.e);
+        for (let i = 0; i < g.length; i += CHUNK_GEN) jobs.push({ tr: false, it: g.slice(i, i + CHUNK_GEN) });
+        for (let i = 0; i < t.length; i += CHUNK_TR) jobs.push({ tr: true, it: t.slice(i, i + CHUNK_TR) });
+      });
+      const run = async (jb) => {
+        const prompt = jb.tr ? buildTrPrompt(jb.it) : buildPrompt(jb.it);
+        const mt = jb.tr ? 900 : 1200;
+        const text = provider === 'claude' ? await callClaude(env, prompt) : await callWorkersAI(env, prompt, mt);
+        return extractList(text);
+      };
+      const settled = await Promise.allSettled(jobs.map(run));
+      const results = [];
+      let firstErr = null;
+      settled.forEach((st) => {
+        if (st.status !== 'fulfilled') { firstErr = firstErr || st.reason; return; }
+        st.value.forEach((r) => {
           const src = byF[String((r && r.f) || '').trim().toLowerCase()];
           if (!src) return;
           const e = src.e ? src.e : joinLines(r.e);
           const j = joinLines(r.j);
           if (e || j) results.push({ f: src.f, e, j });
         });
-        return json({ results, provider });
-      } catch (err) {
-        return json({ error: String((err && err.message) || err) }, 502);
-      }
+      });
+      if (!results.length && firstErr) return json({ error: String((firstErr && firstErr.message) || firstErr) }, 502);
+      return json({ results, provider });
     }
     return json({ error: '見つかりません' }, 404);
   },
