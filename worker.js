@@ -148,7 +148,7 @@ export default {
     const allow = env.ALLOW_ORIGIN ? env.ALLOW_ORIGIN : '*';
     const cors = {
       'Access-Control-Allow-Origin': allow,
-      'Access-Control-Allow-Headers': 'content-type,x-app-token',
+      'Access-Control-Allow-Headers': 'content-type,x-app-token,x-owner-token',
       'Access-Control-Allow-Methods': 'GET,POST,OPTIONS',
       'Access-Control-Max-Age': '86400',
     };
@@ -160,13 +160,16 @@ export default {
     const reqUrl = new URL(request.url);
     if (env.APP_TOKEN && request.headers.get('x-app-token') !== env.APP_TOKEN && reqUrl.searchParams.get('t') !== env.APP_TOKEN) return json({ error: '合言葉が違います' }, 401);
 
+    // 通知とクラウドバックアップ(KVに1件だけ保存)は、管理用の合言葉(OWNER_TOKEN)を知っている人だけが使える。未設定のときは、だれも使えない
+    const ownerOk = !!env.OWNER_TOKEN && request.headers.get('x-owner-token') === env.OWNER_TOKEN;
     const provider = env.ANTHROPIC_API_KEY ? 'claude' : env.AI ? 'workers-ai' : 'none';
     const path = reqUrl.pathname;
 
-    if (path.endsWith('/ping')) return json({ ok: true, provider, version: 13, ai: !!env.AI, claude: !!env.ANTHROPIC_API_KEY, token: !!env.APP_TOKEN, kv: !!env.KV, push: !!env.KV });
+    if (path.endsWith('/ping')) return json({ ok: true, provider, version: 14, ai: !!env.AI, claude: !!env.ANTHROPIC_API_KEY, token: !!env.APP_TOKEN, owner: ownerOk, kv: ownerOk && !!env.KV, push: ownerOk && !!env.KV });
 
     // 通知の設定(KVが必要)
     if (path.includes('/push/')) {
+      if (!ownerOk) return json({ error: 'この機能は管理者だけが使えます' }, 403);
       if (!env.KV) return json({ error: 'KVが設定されていません' }, 501);
       if (path.endsWith('/push/key')) return json({ ok: true, key: (await getVapid(env)).pub });
       if (request.method !== 'POST') return json({ error: 'この操作はできません' }, 405);
@@ -194,6 +197,7 @@ export default {
 
     // クラウドバックアップ(KVに1件だけ保存。6時間以上たっていたら、前の保存を「ひとつ前」に残す)
     if (path.endsWith('/sync')) {
+      if (!ownerOk) return json({ error: 'この機能は管理者だけが使えます' }, 403);
       if (!env.KV) return json({ error: 'KVが設定されていません(Workerの設定でKVを追加してください)' }, 501);
       if (request.method === 'GET' && reqUrl.searchParams.get('test')) {
         const v = String(Date.now());
