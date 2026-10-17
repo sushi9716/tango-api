@@ -161,14 +161,17 @@ export default {
     const reqUrl = new URL(request.url);
     if (env.APP_TOKEN && request.headers.get('x-app-token') !== env.APP_TOKEN && reqUrl.searchParams.get('t') !== env.APP_TOKEN) return json({ error: '合言葉が違います' }, 401);
 
-    const ownTok = request.headers.get('x-owner-token') || reqUrl.searchParams.get('o') || '';
-    const ownerOk = !!env.OWNER_TOKEN && ownTok === env.OWNER_TOKEN;
+    // 合言葉は、前後の空白と全角・半角の違いを無視して比べる(iPhoneの入力で混ざりやすいため)。大文字・小文字は区別する
+    const nz = (v) => String(v || '').normalize('NFKC').trim();
+    const ownTok = nz(request.headers.get('x-owner-token') || reqUrl.searchParams.get('o') || '');
+    const ownSec = nz(env.OWNER_TOKEN);
+    const ownerOk = !!ownSec && ownTok === ownSec;
     // 接続の確認(/ping)以外は、管理用の合言葉(OWNER_TOKEN)を知っている人だけが使える。未設定のときは、だれも使えない
     if (!reqUrl.pathname.endsWith('/ping') && !ownerOk) return json({ error: 'この機能は管理者だけが使えます' }, 403);
     const provider = env.ANTHROPIC_API_KEY ? 'claude' : env.AI ? 'workers-ai' : 'none';
     const path = reqUrl.pathname;
 
-    if (path.endsWith('/ping')) return json({ ok: true, provider, version: 16, ai: !!env.AI, claude: !!env.ANTHROPIC_API_KEY, token: !!env.APP_TOKEN, owner: ownerOk, kv: ownerOk && !!env.KV, push: ownerOk && !!env.KV });
+    if (path.endsWith('/ping')) return json({ ok: true, provider, version: 17, ownerSet: !!ownSec, ownerSent: !!ownTok, ai: !!env.AI, claude: !!env.ANTHROPIC_API_KEY, token: !!env.APP_TOKEN, owner: ownerOk, kv: ownerOk && !!env.KV, push: ownerOk && !!env.KV });
 
     // 通知の設定(KVが必要)
     if (path.includes('/push/')) {
