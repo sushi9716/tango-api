@@ -171,7 +171,7 @@ export default {
     const provider = env.ANTHROPIC_API_KEY ? 'claude' : env.AI ? 'workers-ai' : 'none';
     const path = reqUrl.pathname;
 
-    if (path.endsWith('/ping')) return json({ ok: true, provider, version: 17, ownerSet: !!ownSec, ownerSent: !!ownTok, ai: !!env.AI, claude: !!env.ANTHROPIC_API_KEY, token: !!env.APP_TOKEN, owner: ownerOk, kv: ownerOk && !!env.KV, push: ownerOk && !!env.KV });
+    if (path.endsWith('/ping')) return json({ ok: true, provider, version: 18, ownerSet: !!ownSec, ownerSent: !!ownTok, names: Object.keys(env || {}), ai: !!env.AI, claude: !!env.ANTHROPIC_API_KEY, token: !!env.APP_TOKEN, owner: ownerOk, kv: ownerOk && !!env.KV, push: ownerOk && !!env.KV });
 
     // 通知の設定(KVが必要)
     if (path.includes('/push/')) {
