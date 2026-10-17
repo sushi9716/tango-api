@@ -2,6 +2,7 @@
   "name": "tango-api",
   "main": "worker.js",
   "compatibility_date": "2025-10-01",
+  "keep_vars": true,
   "ai": { "binding": "AI" },
   "kv_namespaces": [
     { "binding": "KV", "id": "978a7d011f0d47aea96133e16497e4b1" }
