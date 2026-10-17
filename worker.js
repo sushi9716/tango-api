@@ -23,11 +23,13 @@ function buildPrompt(items, others) {
   return `次の単語それぞれについて、日本の大学受験を前提に、よく使われるフレーズや使い方(語法)がよくわかる自然な例文を作り、その和訳を付けてください。
 
 条件:
-- "b" は、その単語の意味(登録された訳)。まず、その単語のもっとも代表的な訳をひとつ決め、その訳で使う例文を1つ作る。
-- 訳をひとつに絞れない単語(代表的な意味が複数あり、どれか1つでは足りない)だけ、意味ごとに1つずつ例文を作る。最大3つまで。絞れる単語は、必ず例文を1つだけにする。
+- "b" は、その単語に登録されている意味(品詞つきのことが多い。例: [他] ~を捨てる)。例文は、この "b" に書かれた意味だけをもとに作る。"b" に書かれていない意味や用法は使わない。
+- 書かれた意味の中から、もっとも代表的な意味をひとつ選び、その意味で使う例文を1つ作る。
+- 品詞も "b" に合わせる。[名] なら名詞、[自]・[他] なら動詞、[形] なら形容詞、[副] なら副詞として使う。[他] なら目的語を取る形、[自] なら目的語を取らない形にする。
+- 書かれた意味をひとつに絞れない単語(代表的な意味が複数あり、品詞も分かれるなど、ひとつでは足りない)だけ、"b" に書かれた意味ごとに1つずつ例文を作る。最大3つまで。絞れる単語は、必ず例文を1つだけにする。
 - 例文は大学入試・共通テストで見かける程度の自然な1文にする(長すぎない)。
 - 前置詞との組み合わせやよくあるコロケーションなど、使い方が伝わる文にする。${O}${L}
-- 例文は英語、和訳は自然な日本語にする。
+- 例文は英語、和訳は自然な日本語にする。和訳は、英文の中の語を正確に訳し、語の意味を取り違えない(例: agenda は「議題」)。
 - "e" に既存の例文が入っている単語は、それを一字一句そのまま使い、"j"(和訳)だけ作る。既存が複数行のときは、同じ数だけ和訳を作る。
 ${items.some((x) => x.a) ? '- "a" があるときは、"a" とは別の、違う用法・違う内容の例文を作る(a と同じものは使わない)。\n' : ''}- "e" と "j" は配列にし、同じ順・同じ個数にする(例文が1つなら、1つずつの配列)。
 - 出力はJSONのみ。説明文やコードブロックは付けない。形式: {"results":[{"f":"単語","e":["例文1","例文2"],"j":["和訳1","和訳2"]}]}
@@ -179,7 +181,7 @@ export default {
     const provider = env.ANTHROPIC_API_KEY ? 'claude' : env.AI ? 'workers-ai' : 'none';
     const path = reqUrl.pathname;
 
-    if (path.endsWith('/ping')) return json({ ok: true, provider, version: 19, ownerSet: !!(ownSec || OWNER_HASH), ownerSent: !!ownTok, ai: !!env.AI, claude: !!env.ANTHROPIC_API_KEY, token: !!env.APP_TOKEN, owner: ownerOk, kv: ownerOk && !!env.KV, push: ownerOk && !!env.KV });
+    if (path.endsWith('/ping')) return json({ ok: true, provider, version: 20, ownerSet: !!(ownSec || OWNER_HASH), ownerSent: !!ownTok, ai: !!env.AI, claude: !!env.ANTHROPIC_API_KEY, token: !!env.APP_TOKEN, owner: ownerOk, kv: ownerOk && !!env.KV, push: ownerOk && !!env.KV });
 
     // 通知の設定(KVが必要)
     if (path.includes('/push/')) {
@@ -343,7 +345,7 @@ export default {
       try { body = await request.json(); } catch (e) { return json({ error: '送られたデータが読み取れません' }, 400); }
       const items = (Array.isArray(body.items) ? body.items : [])
         .slice(0, MAX_ITEMS)
-        .map((x) => ({ f: String(x.f || '').slice(0, 60), b: String(x.b || '').slice(0, 120), e: String(x.e || '').slice(0, 300), a: String(x.a || '').slice(0, 300), l: LNAME[x.l] ? x.l : 'en' }))
+        .map((x) => ({ f: String(x.f || '').slice(0, 60), b: String(x.b || '').slice(0, 240), e: String(x.e || '').slice(0, 300), a: String(x.a || '').slice(0, 300), l: LNAME[x.l] ? x.l : 'en' }))
         .filter((x) => x.f && x.b);
       if (!items.length) return json({ error: '単語がありません' }, 400);
       const others = (Array.isArray(body.others) ? body.others : []).map((x) => String(x || '').slice(0, 40)).filter(Boolean).slice(0, 60);
