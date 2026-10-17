@@ -5,6 +5,13 @@
 //  - Secrets(任意): APP_TOKEN(合言葉)、ANTHROPIC_API_KEY(Claudeを使う場合)
 //  - Variables(任意): ALLOW_ORIGIN(アプリのURL。例 https://tangoes.xxxx.workers.dev)、AI_MODEL、CLAUDE_MODEL
 
+// 管理用の合言葉のハッシュ(SHA-256)。合言葉そのものは、ここには書かない
+const OWNER_HASH = '802dd91db2579b8dbb64d11946723cdb2691fe70c6bd1afbe7d9adb1b9731752';
+async function sha256hex(t) {
+  const b = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(t));
+  return [...new Uint8Array(b)].map((x) => x.toString(16).padStart(2, '0')).join('');
+}
+
 const MAX_ITEMS = 36;
 const CHUNK_GEN = 4, CHUNK_TR = 9;
 const LNAME = { en: '英語', es: 'スペイン語', ja: '日本語' };
@@ -165,13 +172,14 @@ export default {
     const nz = (v) => String(v || '').normalize('NFKC').trim();
     const ownTok = nz(request.headers.get('x-owner-token') || reqUrl.searchParams.get('o') || '');
     const ownSec = nz(env.OWNER_TOKEN);
-    const ownerOk = !!ownSec && ownTok === ownSec;
+    // 合言葉は、元に戻せないハッシュ(SHA-256)だけをコードに持つ。環境変数 OWNER_TOKEN も、あれば使える
+    const ownerOk = !!ownTok && ((!!ownSec && ownTok === ownSec) || (await sha256hex(ownTok)) === OWNER_HASH);
     // 接続の確認(/ping)以外は、管理用の合言葉(OWNER_TOKEN)を知っている人だけが使える。未設定のときは、だれも使えない
     if (!reqUrl.pathname.endsWith('/ping') && !ownerOk) return json({ error: 'この機能は管理者だけが使えます' }, 403);
     const provider = env.ANTHROPIC_API_KEY ? 'claude' : env.AI ? 'workers-ai' : 'none';
     const path = reqUrl.pathname;
 
-    if (path.endsWith('/ping')) return json({ ok: true, provider, version: 18, ownerSet: !!ownSec, ownerSent: !!ownTok, names: Object.keys(env || {}), ai: !!env.AI, claude: !!env.ANTHROPIC_API_KEY, token: !!env.APP_TOKEN, owner: ownerOk, kv: ownerOk && !!env.KV, push: ownerOk && !!env.KV });
+    if (path.endsWith('/ping')) return json({ ok: true, provider, version: 19, ownerSet: !!(ownSec || OWNER_HASH), ownerSent: !!ownTok, ai: !!env.AI, claude: !!env.ANTHROPIC_API_KEY, token: !!env.APP_TOKEN, owner: ownerOk, kv: ownerOk && !!env.KV, push: ownerOk && !!env.KV });
 
     // 通知の設定(KVが必要)
     if (path.includes('/push/')) {
