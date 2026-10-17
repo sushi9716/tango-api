@@ -9,23 +9,24 @@ const MAX_ITEMS = 36;
 const CHUNK_GEN = 4, CHUNK_TR = 9;
 const LNAME = { en: '英語', es: 'スペイン語', ja: '日本語' };
 
-function buildPrompt(items) {
+function buildPrompt(items, others) {
   const lg = items[0] && items[0].l;
-  const L = LNAME[lg] && lg !== 'en' ? `\n- 単語は${LNAME[lg]}です。フレーズも${LNAME[lg]}で作る(大学受験の観点は不要。日常でよく使う自然な語句にする)。` : '';
-  return `次の単語それぞれについて、日本の大学受験(共通テスト・難関大の入試)向けの「重要フレーズ」(短い語句)を作り、その和訳を付けてください。
+  const L = LNAME[lg] && lg !== 'en' ? `\n- 単語は${LNAME[lg]}です。例文も${LNAME[lg]}で作る(大学受験の観点は不要。日常でよく使う自然な1文にする)。` : '';
+  const O = others && others.length ? `\n- 下の「他の登録単語」を、不自然にならない範囲で例文に含めてよい(無理に含めない)。` : '';
+  return `次の単語それぞれについて、日本の大学受験を前提に、よく使われるフレーズや使い方(語法)がよくわかる自然な例文を作り、その和訳を付けてください。
 
 条件:
-- 文ではなく、2〜6語ほどの短いフレーズにする。ピリオドは付けない。例: abandon → abandon a plan / 計画を断念する
-- 前置詞との組み合わせ、コロケーション、入試で問われる語法を優先する。使い方が一目でわかる形にする。
-- "b" (意味)に複数の意味や用法があるときは、意味ごとに1つずつフレーズを作る(最大3つ)。意味が1つなら、フレーズも1つでよい。
-- 単語は、原形か自然な活用形で使う。${L}
-- 和訳は、フレーズに対応する短く自然な日本語にする。
-- "e" に既存の例文やフレーズが入っている単語は、それを一字一句そのまま使い、"j"(和訳)だけ作る。既存が複数行のときは、同じ数だけ和訳を作る。
-${items.some((x) => x.a) ? '- "a" があるときは、"a" のフレーズとは別の、違う用法・違う組み合わせのフレーズを作る(a と同じものは使わない)。\n' : ''}- "e" と "j" は配列にし、同じ順・同じ個数にする。
-- 出力はJSONのみ。説明文やコードブロックは付けない。形式: {"results":[{"f":"単語","e":["フレーズ1","フレーズ2"],"j":["和訳1","和訳2"]}]}
+- "b" は、その単語の意味(登録された訳)。まず、その単語のもっとも代表的な訳をひとつ決め、その訳で使う例文を1つ作る。
+- 訳をひとつに絞れない単語(代表的な意味が複数あり、どれか1つでは足りない)だけ、意味ごとに1つずつ例文を作る。最大3つまで。絞れる単語は、必ず例文を1つだけにする。
+- 例文は大学入試・共通テストで見かける程度の自然な1文にする(長すぎない)。
+- 前置詞との組み合わせやよくあるコロケーションなど、使い方が伝わる文にする。${O}${L}
+- 例文は英語、和訳は自然な日本語にする。
+- "e" に既存の例文が入っている単語は、それを一字一句そのまま使い、"j"(和訳)だけ作る。既存が複数行のときは、同じ数だけ和訳を作る。
+${items.some((x) => x.a) ? '- "a" があるときは、"a" とは別の、違う用法・違う内容の例文を作る(a と同じものは使わない)。\n' : ''}- "e" と "j" は配列にし、同じ順・同じ個数にする(例文が1つなら、1つずつの配列)。
+- 出力はJSONのみ。説明文やコードブロックは付けない。形式: {"results":[{"f":"単語","e":["例文1","例文2"],"j":["和訳1","和訳2"]}]}
 
 対象の単語:
-${JSON.stringify(items)}`;
+${JSON.stringify(items)}${others && others.length ? `\n\n他の登録単語:\n${others.join(', ')}` : ''}`;
 }
 function buildTrPrompt(items) {
   const lg = items[0] && items[0].l;
@@ -160,12 +161,14 @@ export default {
     const reqUrl = new URL(request.url);
     if (env.APP_TOKEN && request.headers.get('x-app-token') !== env.APP_TOKEN && reqUrl.searchParams.get('t') !== env.APP_TOKEN) return json({ error: '合言葉が違います' }, 401);
 
-    // 通知とクラウドバックアップ(KVに1件だけ保存)は、管理用の合言葉(OWNER_TOKEN)を知っている人だけが使える。未設定のときは、だれも使えない
-    const ownerOk = !!env.OWNER_TOKEN && request.headers.get('x-owner-token') === env.OWNER_TOKEN;
+    const ownTok = request.headers.get('x-owner-token') || reqUrl.searchParams.get('o') || '';
+    const ownerOk = !!env.OWNER_TOKEN && ownTok === env.OWNER_TOKEN;
+    // 接続の確認(/ping)以外は、管理用の合言葉(OWNER_TOKEN)を知っている人だけが使える。未設定のときは、だれも使えない
+    if (!reqUrl.pathname.endsWith('/ping') && !ownerOk) return json({ error: 'この機能は管理者だけが使えます' }, 403);
     const provider = env.ANTHROPIC_API_KEY ? 'claude' : env.AI ? 'workers-ai' : 'none';
     const path = reqUrl.pathname;
 
-    if (path.endsWith('/ping')) return json({ ok: true, provider, version: 14, ai: !!env.AI, claude: !!env.ANTHROPIC_API_KEY, token: !!env.APP_TOKEN, owner: ownerOk, kv: ownerOk && !!env.KV, push: ownerOk && !!env.KV });
+    if (path.endsWith('/ping')) return json({ ok: true, provider, version: 16, ai: !!env.AI, claude: !!env.ANTHROPIC_API_KEY, token: !!env.APP_TOKEN, owner: ownerOk, kv: ownerOk && !!env.KV, push: ownerOk && !!env.KV });
 
     // 通知の設定(KVが必要)
     if (path.includes('/push/')) {
@@ -332,9 +335,10 @@ export default {
         .map((x) => ({ f: String(x.f || '').slice(0, 60), b: String(x.b || '').slice(0, 120), e: String(x.e || '').slice(0, 300), a: String(x.a || '').slice(0, 300), l: LNAME[x.l] ? x.l : 'en' }))
         .filter((x) => x.f && x.b);
       if (!items.length) return json({ error: '単語がありません' }, 400);
+      const others = (Array.isArray(body.others) ? body.others : []).map((x) => String(x || '').slice(0, 40)).filter(Boolean).slice(0, 60);
       const byF = {};
       items.forEach((x) => { byF[x.f.toLowerCase()] = x; });
-      // 例文ありは和訳だけ(速い)、例文なしはフレーズ生成。言語ごと・種類ごとに小さく分けて、並列で実行する
+      // 例文ありは和訳だけ(速い)、例文なしは例文生成。言語ごと・種類ごとに小さく分けて、並列で実行する
       const jobs = [];
       ['en', 'es', 'ja'].forEach((lg) => {
         const g = items.filter((x) => x.l === lg && !x.e), t = items.filter((x) => x.l === lg && x.e);
@@ -342,7 +346,7 @@ export default {
         for (let i = 0; i < t.length; i += CHUNK_TR) jobs.push({ tr: true, it: t.slice(i, i + CHUNK_TR) });
       });
       const run = async (jb) => {
-        const prompt = jb.tr ? buildTrPrompt(jb.it) : buildPrompt(jb.it);
+        const prompt = jb.tr ? buildTrPrompt(jb.it) : buildPrompt(jb.it, others);
         const mt = jb.tr ? 900 : 1200;
         const text = provider === 'claude' ? await callClaude(env, prompt) : await callWorkersAI(env, prompt, mt);
         return extractList(text);
